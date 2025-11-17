@@ -1,0 +1,4 @@
+split,files,samples,general_note,dead_note,harmonic
+Train,429,3502,3311,104,87
+Val,92,704,612,75,17
+Test,92,716,612,82,22
