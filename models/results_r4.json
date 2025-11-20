@@ -1,0 +1,18 @@
+{
+  "test_accuracy": 86.27450980392157,
+  "test_f1_macro": 0.8075231320035338,
+  "test_f1_harmonic": 0.9253731343283582,
+  "test_f1_dead_note": 0.6,
+  "test_f1_general_note": 0.897196261682243,
+  "test_loss": 0.3329190146178007,
+  "best_val_accuracy": 88.0952380952381,
+  "best_val_metric": 0.9538461538461539,
+  "selection_metric": "Harmonic F1",
+  "best_epoch": 24,
+  "total_epochs": 100,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "dropout": 0.5,
+  "harmonic_weight_multiplier": 2.0,
+  "n_samples_per_class": 300
+}

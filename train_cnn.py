@@ -150,11 +150,21 @@ class HarmonicsCNN(nn.Module):
         return x
 
 
-def compute_class_weights(labels):
-    """Compute class weights for imbalanced dataset."""
+def compute_class_weights(labels, harmonic_multiplier=1.0):
+    """Compute class weights for imbalanced dataset.
+    
+    Args:
+        labels: Array of class labels
+        harmonic_multiplier: Additional weight multiplier for harmonic class (default 1.0)
+                           Set > 1.0 to prioritize harmonic detection
+    """
     unique, counts = np.unique(labels, return_counts=True)
     total = len(labels)
     weights = total / (len(unique) * counts)
+    
+    # Apply additional multiplier to harmonic class (index 0)
+    weights[0] *= harmonic_multiplier
+    
     return torch.FloatTensor(weights)
 
 
@@ -164,6 +174,8 @@ def train_epoch(model, loader, criterion, optimizer, device):
     running_loss = 0.0
     correct = 0
     total = 0
+    all_preds = []
+    all_labels = []
     
     pbar = tqdm(loader, desc='Training')
     for inputs, labels in pbar:
@@ -180,9 +192,12 @@ def train_epoch(model, loader, criterion, optimizer, device):
         total += labels.size(0)
         correct += predicted.eq(labels).sum().item()
         
+        all_preds.extend(predicted.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        
         pbar.set_postfix({'loss': running_loss / (pbar.n + 1), 'acc': 100. * correct / total})
     
-    return running_loss / len(loader), 100. * correct / total
+    return running_loss / len(loader), 100. * correct / total, all_preds, all_labels
 
 
 def validate(model, loader, criterion, device):
@@ -273,6 +288,10 @@ def main():
                        help='Dropout rate')
     parser.add_argument('--n-samples', type=int, default=None,
                        help='Limit samples per class (None for all)')
+    parser.add_argument('--harmonic-weight', type=float, default=2.0,
+                       help='Additional weight multiplier for harmonic class (default 2.0)')
+    parser.add_argument('--use-harmonic-f1', action='store_true',
+                       help='Use harmonic F1 score (instead of val accuracy) for model selection')
     
     args = parser.parse_args()
     
@@ -360,9 +379,12 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)
     
-    # Compute class weights
-    class_weights = compute_class_weights(train_dataset.labels).to(device)
-    print(f"\nClass weights: {class_weights.cpu().numpy()}")
+    # Compute class weights with harmonic emphasis
+    class_weights = compute_class_weights(train_dataset.labels, harmonic_multiplier=args.harmonic_weight).to(device)
+    print(f"\nClass weights (with harmonic_multiplier={args.harmonic_weight}): {class_weights.cpu().numpy()}")
+    print(f"  harmonic weight: {class_weights[0]:.4f}")
+    print(f"  dead_note weight: {class_weights[1]:.4f}")
+    print(f"  general_note weight: {class_weights[2]:.4f}")
     
     # Create model
     print("\nCreating model...")
@@ -383,17 +405,21 @@ def main():
         'train_loss': [],
         'train_acc': [],
         'val_loss': [],
-        'val_acc': []
+        'val_acc': [],
+        'train_harmonic_f1': [],
+        'val_harmonic_f1': []
     }
     
     best_val_acc = 0.0
+    best_val_metric = 0.0  # For harmonic F1 or overall accuracy
     best_epoch = 0
+    metric_name = 'Harmonic F1' if args.use_harmonic_f1 else 'Val Acc'
     
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch+1}/{args.epochs}")
         
         # Train
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_acc, train_preds, train_labels = train_epoch(model, train_loader, criterion, optimizer, device)
         
         # Validate
         val_loss, val_acc, val_preds, val_labels = validate(model, val_loader, criterion, device)
@@ -401,20 +427,30 @@ def main():
         # Update scheduler
         scheduler.step(val_loss)
         
+        # Compute F1 scores
+        val_f1_macro = f1_score(val_labels, val_preds, average='macro')
+        train_f1_per_class = f1_score(train_labels, train_preds, average=None)
+        val_f1_per_class = f1_score(val_labels, val_preds, average=None)
+        
         # Save history
         history['train_loss'].append(train_loss)
         history['train_acc'].append(train_acc)
         history['val_loss'].append(val_loss)
         history['val_acc'].append(val_acc)
-        
-        # Compute F1 score
-        val_f1 = f1_score(val_labels, val_preds, average='macro')
+        history['train_harmonic_f1'].append(float(train_f1_per_class[0]))
+        history['val_harmonic_f1'].append(float(val_f1_per_class[0]))
         
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
-        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val F1: {val_f1:.4f}")
+        print(f"  Per-class F1 - Harmonic: {train_f1_per_class[0]:.4f}, Dead: {train_f1_per_class[1]:.4f}, General: {train_f1_per_class[2]:.4f}")
+        print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val F1 (macro): {val_f1_macro:.4f}")
+        print(f"  Per-class F1 - Harmonic: {val_f1_per_class[0]:.4f}, Dead: {val_f1_per_class[1]:.4f}, General: {val_f1_per_class[2]:.4f}")
         
-        # Save best model
-        if val_acc > best_val_acc:
+        # Determine current metric for model selection
+        current_metric = val_f1_per_class[0] if args.use_harmonic_f1 else val_acc
+        
+        # Save best model based on selected metric
+        if current_metric > best_val_metric:
+            best_val_metric = current_metric
             best_val_acc = val_acc
             best_epoch = epoch + 1
             torch.save({
@@ -422,11 +458,14 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_acc': val_acc,
-                'val_f1': val_f1,
+                'val_f1_macro': val_f1_macro,
+                'val_harmonic_f1': float(val_f1_per_class[0]),
+                'val_f1_per_class': val_f1_per_class.tolist(),
             }, output_dir / 'best_model.pt')
-            print(f"✓ Saved best model (val_acc: {val_acc:.2f}%)")
+            print(f"✓ Saved best model ({metric_name}: {current_metric:.4f})")
     
-    print(f"\nBest validation accuracy: {best_val_acc:.2f}% at epoch {best_epoch}")
+    print(f"\nBest {metric_name}: {best_val_metric:.4f} at epoch {best_epoch}")
+    print(f"Corresponding validation accuracy: {best_val_acc:.2f}%")
     
     # Plot training history
     print("\nPlotting training history...")
@@ -443,11 +482,16 @@ def main():
     
     # Test
     test_loss, test_acc, test_preds, test_labels = validate(model, test_loader, criterion, device)
-    test_f1 = f1_score(test_labels, test_preds, average='macro')
+    test_f1_macro = f1_score(test_labels, test_preds, average='macro')
+    test_f1_per_class = f1_score(test_labels, test_preds, average=None)
     
     print(f"\nTest Loss: {test_loss:.4f}")
     print(f"Test Accuracy: {test_acc:.2f}%")
-    print(f"Test F1 Score (macro): {test_f1:.4f}")
+    print(f"Test F1 Score (macro): {test_f1_macro:.4f}")
+    print(f"\nPer-class Test F1 Scores:")
+    print(f"  Harmonic: {test_f1_per_class[0]:.4f}")
+    print(f"  Dead Note: {test_f1_per_class[1]:.4f}")
+    print(f"  General Note: {test_f1_per_class[2]:.4f}")
     
     # Classification report
     print("\nClassification Report:")
@@ -460,14 +504,20 @@ def main():
     # Save results
     results = {
         'test_accuracy': float(test_acc),
-        'test_f1_macro': float(test_f1),
+        'test_f1_macro': float(test_f1_macro),
+        'test_f1_harmonic': float(test_f1_per_class[0]),
+        'test_f1_dead_note': float(test_f1_per_class[1]),
+        'test_f1_general_note': float(test_f1_per_class[2]),
         'test_loss': float(test_loss),
         'best_val_accuracy': float(best_val_acc),
+        'best_val_metric': float(best_val_metric),
+        'selection_metric': metric_name,
         'best_epoch': int(best_epoch),
         'total_epochs': args.epochs,
         'batch_size': args.batch_size,
         'learning_rate': args.lr,
         'dropout': args.dropout,
+        'harmonic_weight_multiplier': args.harmonic_weight,
         'n_samples_per_class': args.n_samples,
     }
     
