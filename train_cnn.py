@@ -501,6 +501,72 @@ def main():
     print("\nPlotting confusion matrix...")
     plot_confusion_matrix(test_labels, test_preds, output_dir)
     
+    # Identify and save harmonic misclassifications
+    print("\nAnalyzing harmonic misclassifications...")
+    
+    # Convert to numpy arrays
+    test_preds_np = np.array(test_preds)
+    test_labels_np = np.array(test_labels)
+    
+    # Find false positives: predicted harmonic (0) but actually not harmonic
+    false_positives_idx = np.where((test_preds_np == 0) & (test_labels_np != 0))[0]
+    
+    # Find false negatives: predicted not harmonic but actually harmonic (0)
+    false_negatives_idx = np.where((test_preds_np != 0) & (test_labels_np == 0))[0]
+    
+    # Create detailed reports
+    class_names = ['harmonic', 'dead_note', 'general_note']
+    misclassifications = {
+        'false_positives': [],
+        'false_negatives': []
+    }
+    
+    print(f"  Found {len(false_positives_idx)} false positives (predicted harmonic, actually not)")
+    for idx in false_positives_idx:
+        test_sample = test_df.iloc[idx]
+        misclassifications['false_positives'].append({
+            'index': int(idx),
+            'audio_file': str(test_sample['source_audio']),
+            'onset_sec': float(test_sample['onset_sec']),
+            'duration_sec': float(test_sample['duration_sec']),
+            'true_label': class_names[test_labels_np[idx]],
+            'predicted_label': class_names[test_preds_np[idx]],
+            'pitch_midi': int(test_sample['pitch_midi']) if pd.notna(test_sample['pitch_midi']) else None
+        })
+    
+    print(f"  Found {len(false_negatives_idx)} false negatives (predicted not harmonic, actually harmonic)")
+    for idx in false_negatives_idx:
+        test_sample = test_df.iloc[idx]
+        misclassifications['false_negatives'].append({
+            'index': int(idx),
+            'audio_file': str(test_sample['source_audio']),
+            'onset_sec': float(test_sample['onset_sec']),
+            'duration_sec': float(test_sample['duration_sec']),
+            'true_label': class_names[test_labels_np[idx]],
+            'predicted_label': class_names[test_preds_np[idx]],
+            'pitch_midi': int(test_sample['pitch_midi']) if pd.notna(test_sample['pitch_midi']) else None
+        })
+    
+    # Save misclassifications to JSON
+    misclass_path = output_dir / 'harmonic_misclassifications.json'
+    with open(misclass_path, 'w') as f:
+        json.dump(misclassifications, f, indent=2)
+    
+    print(f"✓ Misclassifications saved to {misclass_path}")
+    
+    # Save to CSV for easier viewing
+    if len(false_positives_idx) > 0:
+        fp_df = pd.DataFrame(misclassifications['false_positives'])
+        fp_csv_path = output_dir / 'false_positives_harmonics.csv'
+        fp_df.to_csv(fp_csv_path, index=False)
+        print(f"✓ False positives saved to {fp_csv_path}")
+    
+    if len(false_negatives_idx) > 0:
+        fn_df = pd.DataFrame(misclassifications['false_negatives'])
+        fn_csv_path = output_dir / 'false_negatives_harmonics.csv'
+        fn_df.to_csv(fn_csv_path, index=False)
+        print(f"✓ False negatives saved to {fn_csv_path}")
+    
     # Save results
     results = {
         'test_accuracy': float(test_acc),
