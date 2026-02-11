@@ -10,9 +10,10 @@ import re
 from pathlib import Path
 import librosa
 
-# Paths
-METADATA_PATH = Path('processed_dataset/metadata.csv')
-HARMONICS_DIR = Path('note_clips/harmonic')
+# Paths (use absolute paths to work with conda run)
+SCRIPT_DIR = Path(__file__).parent.resolve()
+METADATA_PATH = SCRIPT_DIR / 'processed_dataset/metadata.csv'
+HARMONICS_DIR = SCRIPT_DIR / 'note_clips/harmonic'
 
 # Load existing metadata
 print("Loading existing metadata...")

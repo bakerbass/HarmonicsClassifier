@@ -40,7 +40,7 @@ IDMT-SMT-GUITAR_V2/
 harmonic_clips/
 note_clips/
 processed_dataset/
-
+*.wav
 # IDE
 .vscode/
 .idea/
