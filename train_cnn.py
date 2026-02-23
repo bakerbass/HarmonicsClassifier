@@ -37,8 +37,8 @@ class HarmonicsDataset(Dataset):
         self.n_fft = n_fft
         self.hop_length = hop_length
         
-        # Label mapping
-        self.label_map = {'harmonic': 0, 'dead_note': 1, 'general_note': 2}
+        # Binary label mapping: harmonic=0, not_harmonic=1
+        self.label_map = {'harmonic': 0, 'dead_note': 1, 'general_note': 1}
         self.labels = [self.label_map[label] for label in self.metadata['label_category']]
         
     def __len__(self):
@@ -94,59 +94,79 @@ class HarmonicsDataset(Dataset):
             return mel_tensor, label
 
 
-class HarmonicsCNN(nn.Module):
-    """CNN for guitar harmonics classification."""
-    
-    def __init__(self, num_classes=3, dropout=0.5):
-        super(HarmonicsCNN, self).__init__()
-        
-        # Convolutional layers
+class HarmonicsCRNN(nn.Module):
+    """CRNN for binary guitar harmonics classification (harmonic vs. not harmonic).
+
+    Architecture:
+        3 convolutional blocks → frequency-axis pooling → GRU → FC classifier
+    """
+
+    def __init__(self, num_classes=2, gru_hidden=64, gru_layers=1, dropout=0.5):
+        super(HarmonicsCRNN, self).__init__()
+
+        # --- Convolutional blocks ---
+        # Input: (B, 1, 128, T)  e.g. T~130 for 3-second clips
         self.conv1 = nn.Sequential(
             nn.Conv2d(1, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.MaxPool2d(2, 2),
+            nn.MaxPool2d(2, 2),          # → (B, 32, 64, T/2)
             nn.Dropout2d(0.25)
         )
-        
+
         self.conv2 = nn.Sequential(
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.MaxPool2d(2, 2),
+            nn.MaxPool2d(2, 2),          # → (B, 64, 32, T/4)
             nn.Dropout2d(0.25)
         )
-        
+
         self.conv3 = nn.Sequential(
             nn.Conv2d(64, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.MaxPool2d(2, 2),
+            nn.MaxPool2d(2, 2),          # → (B, 128, 16, T/8)
             nn.Dropout2d(0.25)
         )
-        
-        self.conv4 = nn.Sequential(
-            nn.Conv2d(128, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1))  # Global average pooling
+
+        # Collapse frequency axis to a fixed size of 1, keep time axis
+        # Output: (B, 128, 1, T/8)  →  squeeze  →  (B, 128, T/8)
+        self.freq_pool = nn.AdaptiveAvgPool2d((1, 16))
+
+        # --- Recurrent layer ---
+        # Input per step: 128 features; 16 time steps
+        self.gru = nn.GRU(
+            input_size=128,
+            hidden_size=gru_hidden,
+            num_layers=gru_layers,
+            batch_first=True,
+            dropout=dropout if gru_layers > 1 else 0.0
         )
-        
-        # Fully connected layers
+
+        # --- Classifier head ---
         self.fc = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(256, 128),
-            nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(128, num_classes)
+            nn.Linear(gru_hidden, num_classes)
         )
-        
+
     def forward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
-        x = self.conv3(x)
-        x = self.conv4(x)
-        x = self.fc(x)
+        # Convolutional feature extraction
+        x = self.conv1(x)               # (B, 32,  64, T/2)
+        x = self.conv2(x)               # (B, 64,  32, T/4)
+        x = self.conv3(x)               # (B, 128, 16, T/8)
+
+        # Pool frequency axis → fixed temporal sequence
+        x = self.freq_pool(x)           # (B, 128, 1, 16)
+        x = x.squeeze(2)                # (B, 128, 16)
+        x = x.permute(0, 2, 1)          # (B, 16, 128)  — (batch, time, features)
+
+        # GRU: use last hidden state as summary
+        _, h_n = self.gru(x)            # h_n: (num_layers, B, hidden)
+        x = h_n[-1]                     # (B, hidden)
+
+        # Classify
+        x = self.fc(x)                  # (B, num_classes)
         return x
 
 
@@ -258,11 +278,11 @@ def plot_training_history(history, output_dir):
 def plot_confusion_matrix(y_true, y_pred, output_dir):
     """Plot confusion matrix."""
     cm = confusion_matrix(y_true, y_pred)
-    
-    plt.figure(figsize=(8, 6))
+
+    plt.figure(figsize=(6, 5))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
-                xticklabels=['harmonic', 'dead_note', 'general_note'],
-                yticklabels=['harmonic', 'dead_note', 'general_note'])
+                xticklabels=['harmonic', 'not_harmonic'],
+                yticklabels=['harmonic', 'not_harmonic'])
     plt.title('Confusion Matrix - Test Set')
     plt.ylabel('True Label')
     plt.xlabel('Predicted Label')
@@ -315,7 +335,7 @@ def main():
     df = pd.read_csv(metadata_path)
     print(f"Loaded {len(df)} samples")
     
-    # Optionally limit samples per class
+    # Optionally limit samples per class (applied to original 3-class labels before binarization)
     if args.n_samples:
         print(f"\nLimiting to {args.n_samples} samples per class...")
         df_balanced = []
@@ -328,7 +348,7 @@ def main():
     
     # Split by audio files to prevent data leakage
     print("\nSplitting dataset by audio files...")
-    audio_files = df['source_audio'].unique()
+    audio_files = np.array(df['source_audio'].unique())
     
     # Create file-to-dominant-class mapping for stratification
     file_labels = {}
@@ -359,14 +379,14 @@ def main():
     print(f"  Val: {len(val_df)} samples from {len(val_files)} files")
     print(f"  Test: {len(test_df)} samples from {len(test_files)} files")
     
-    # Print class distribution
-    print("\nClass distribution:")
+    # Print class distribution (binary: harmonic vs. not_harmonic)
+    print("\nClass distribution (binary):")
     for split_name, split_df in [('Train', train_df), ('Val', val_df), ('Test', test_df)]:
         print(f"  {split_name}:")
-        for label in ['harmonic', 'dead_note', 'general_note']:
-            count = (split_df['label_category'] == label).sum()
-            pct = 100 * count / len(split_df)
-            print(f"    {label}: {count} ({pct:.1f}%)")
+        harmonic_count = (split_df['label_category'] == 'harmonic').sum()
+        not_harmonic_count = len(split_df) - harmonic_count
+        print(f"    harmonic:     {harmonic_count} ({100*harmonic_count/len(split_df):.1f}%)")
+        print(f"    not_harmonic: {not_harmonic_count} ({100*not_harmonic_count/len(split_df):.1f}%)")
     
     # Create datasets
     print("\nCreating datasets...")
@@ -382,19 +402,18 @@ def main():
     # Compute class weights with harmonic emphasis
     class_weights = compute_class_weights(train_dataset.labels, harmonic_multiplier=args.harmonic_weight).to(device)
     print(f"\nClass weights (with harmonic_multiplier={args.harmonic_weight}): {class_weights.cpu().numpy()}")
-    print(f"  harmonic weight: {class_weights[0]:.4f}")
-    print(f"  dead_note weight: {class_weights[1]:.4f}")
-    print(f"  general_note weight: {class_weights[2]:.4f}")
+    print(f"  harmonic weight:     {class_weights[0]:.4f}")
+    print(f"  not_harmonic weight: {class_weights[1]:.4f}")
     
     # Create model
     print("\nCreating model...")
-    model = HarmonicsCNN(num_classes=3, dropout=args.dropout).to(device)
+    model = HarmonicsCRNN(num_classes=2, dropout=args.dropout).to(device)
     print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Loss and optimizer
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     
     # Training loop
     print("\n" + "="*60)
@@ -441,9 +460,9 @@ def main():
         history['val_harmonic_f1'].append(float(val_f1_per_class[0]))
         
         print(f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.2f}%")
-        print(f"  Per-class F1 - Harmonic: {train_f1_per_class[0]:.4f}, Dead: {train_f1_per_class[1]:.4f}, General: {train_f1_per_class[2]:.4f}")
+        print(f"  Per-class F1 - Harmonic: {train_f1_per_class[0]:.4f}, Not-Harmonic: {train_f1_per_class[1]:.4f}")
         print(f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.2f}%, Val F1 (macro): {val_f1_macro:.4f}")
-        print(f"  Per-class F1 - Harmonic: {val_f1_per_class[0]:.4f}, Dead: {val_f1_per_class[1]:.4f}, General: {val_f1_per_class[2]:.4f}")
+        print(f"  Per-class F1 - Harmonic: {val_f1_per_class[0]:.4f}, Not-Harmonic: {val_f1_per_class[1]:.4f}")
         
         # Determine current metric for model selection
         current_metric = val_f1_per_class[0] if args.use_harmonic_f1 else val_acc
@@ -489,13 +508,12 @@ def main():
     print(f"Test Accuracy: {test_acc:.2f}%")
     print(f"Test F1 Score (macro): {test_f1_macro:.4f}")
     print(f"\nPer-class Test F1 Scores:")
-    print(f"  Harmonic: {test_f1_per_class[0]:.4f}")
-    print(f"  Dead Note: {test_f1_per_class[1]:.4f}")
-    print(f"  General Note: {test_f1_per_class[2]:.4f}")
-    
+    print(f"  Harmonic:     {test_f1_per_class[0]:.4f}")
+    print(f"  Not-Harmonic: {test_f1_per_class[1]:.4f}")
+
     # Classification report
     print("\nClassification Report:")
-    print(classification_report(test_labels, test_preds, target_names=['harmonic', 'dead_note', 'general_note']))
+    print(classification_report(test_labels, test_preds, target_names=['harmonic', 'not_harmonic']))
     
     # Plot confusion matrix
     print("\nPlotting confusion matrix...")
@@ -503,19 +521,19 @@ def main():
     
     # Identify and save harmonic misclassifications
     print("\nAnalyzing harmonic misclassifications...")
-    
+
     # Convert to numpy arrays
     test_preds_np = np.array(test_preds)
     test_labels_np = np.array(test_labels)
-    
+
     # Find false positives: predicted harmonic (0) but actually not harmonic
     false_positives_idx = np.where((test_preds_np == 0) & (test_labels_np != 0))[0]
-    
+
     # Find false negatives: predicted not harmonic but actually harmonic (0)
     false_negatives_idx = np.where((test_preds_np != 0) & (test_labels_np == 0))[0]
-    
+
     # Create detailed reports
-    class_names = ['harmonic', 'dead_note', 'general_note']
+    class_names = ['harmonic', 'not_harmonic']
     misclassifications = {
         'false_positives': [],
         'false_negatives': []
@@ -572,8 +590,7 @@ def main():
         'test_accuracy': float(test_acc),
         'test_f1_macro': float(test_f1_macro),
         'test_f1_harmonic': float(test_f1_per_class[0]),
-        'test_f1_dead_note': float(test_f1_per_class[1]),
-        'test_f1_general_note': float(test_f1_per_class[2]),
+        'test_f1_not_harmonic': float(test_f1_per_class[1]),
         'test_loss': float(test_loss),
         'best_val_accuracy': float(best_val_acc),
         'best_val_metric': float(best_val_metric),
