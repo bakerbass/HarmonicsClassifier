@@ -117,13 +117,19 @@ def preprocess_audio(audio_path, sr=22050, duration=3.0, n_mels=128, n_fft=2048,
     return mel_tensor
 
 
-def predict(model, audio_tensor, device):
-    """Run inference on audio tensor."""
+def predict(model, audio_tensor, device, temperature=1.5):
+    """Run inference on audio tensor with temperature scaling.
+    
+    Temperature scaling divides logits by T before softmax:
+      - T > 1: softer distribution, less overconfident (more realistic)
+      - T = 1: standard softmax
+      - T < 1: sharper distribution, more confident
+    """
     audio_tensor = audio_tensor.to(device)
     
     with torch.no_grad():
-        outputs = model(audio_tensor)
-        probabilities = torch.softmax(outputs, dim=1)
+        logits = model(audio_tensor)
+        probabilities = torch.softmax(logits / temperature, dim=1)
         predicted_class = torch.argmax(probabilities, dim=1).item()
         confidence = probabilities[0, predicted_class].item()
     
@@ -136,6 +142,9 @@ def main():
     parser.add_argument('--model', default='models/best_model.pt', help='Path to trained model')
     parser.add_argument('--duration', type=float, default=3.0, help='Duration to analyze (seconds)')
     parser.add_argument('--offset', type=float, default=0.0, help='Start time offset (seconds)')
+    parser.add_argument('--temperature', type=float, default=1.5,
+                        help='Temperature for scaling logits before softmax (default: 1.5). '
+                             'Values > 1 produce softer, less overconfident predictions.')
     parser.add_argument('--show-probs', action='store_true', help='Show probabilities for all classes')
     
     args = parser.parse_args()
@@ -173,8 +182,8 @@ def main():
     audio_tensor = preprocess_audio(audio_path, duration=args.duration, offset=args.offset)
     
     # Predict
-    print("\nRunning inference...")
-    predicted_class, confidence, probabilities = predict(model, audio_tensor, device)
+    print(f"\nRunning inference... (temperature={args.temperature})")
+    predicted_class, confidence, probabilities = predict(model, audio_tensor, device, temperature=args.temperature)
     
     # Display results
     print("\n" + "="*60)

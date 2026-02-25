@@ -86,8 +86,8 @@ class HarmonicsCNN(nn.Module):
 class RealtimeClassifier:
     """Real-time audio classifier with OSC control."""
     
-    def __init__(self, model_path, device, device_id, osc_host='127.0.0.1', osc_port=9000, 
-                 duration=1, plot_enabled=False):
+    def __init__(self, model_path, device, device_id, osc_host='127.0.0.1', osc_port=9000,
+                 duration=1, plot_enabled=False, temperature=1.5):
         self.device = device
         self.device_id = device_id
         self.model_sr = 22050  # Model's expected sample rate
@@ -96,6 +96,7 @@ class RealtimeClassifier:
         self.n_mels = 128
         self.n_fft = 2048
         self.hop_length = 512
+        self.temperature = temperature
         
         # Get device's default sample rate
         device_info = sd.query_devices(device_id)
@@ -176,12 +177,18 @@ class RealtimeClassifier:
         return mel_tensor
     
     def predict(self, audio_tensor):
-        """Run inference on audio tensor."""
+        """Run inference on audio tensor with temperature scaling.
+        
+        Temperature scaling divides logits by self.temperature before softmax:
+          - T > 1: softer distribution, less overconfident (more realistic)
+          - T = 1: standard softmax
+          - T < 1: sharper distribution, more confident
+        """
         audio_tensor = audio_tensor.to(self.device)
         
         with torch.no_grad():
-            outputs = self.model(audio_tensor)
-            probabilities = torch.softmax(outputs, dim=1)
+            logits = self.model(audio_tensor)
+            probabilities = torch.softmax(logits / self.temperature, dim=1)
             predicted_class = torch.argmax(probabilities, dim=1).item()
             confidence = probabilities[0, predicted_class].item()
         
@@ -405,6 +412,9 @@ def main():
     parser.add_argument('--osc-port', type=int, default=9000, help='OSC server port')
     parser.add_argument('--duration', type=float, default=3.0, help='Audio duration for classification (seconds)')
     parser.add_argument('--plot', action='store_true', help='Plot waveform and spectrogram before classification')
+    parser.add_argument('--temperature', type=float, default=1.5,
+                        help='Temperature for scaling logits before softmax (default: 1.5). '
+                             'Values > 1 produce softer, less overconfident predictions.')
     
     args = parser.parse_args()
     
@@ -428,7 +438,8 @@ def main():
         osc_host=args.osc_host,
         osc_port=args.osc_port,
         duration=args.duration,
-        plot_enabled=args.plot
+        plot_enabled=args.plot,
+        temperature=args.temperature
     )
     
     # Send test message to verify OSC connection
