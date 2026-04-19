@@ -10,6 +10,37 @@ Build a **PyTorch** training pipeline for a **CNN** that classifies **single-not
 
 The model will operate on **pre-extracted note snippets** with variable durations. The agent should create a **reproducible training scaffold**, including data loading, model definition, training loop, and evaluation scripts.
 
+### CNN Harmonics Classifier ML Architecture
+
+```mermaid
+flowchart TD
+    A[Metadata CSV<br/>onset offset duration label_category] --> B[Event Audio Loader<br/>librosa.load]
+    B --> C[Clip Standardization<br/>resample 22.05kHz<br/>pad or trim to 3.0s]
+    C --> D[Feature Extraction<br/>Log-Mel Spectrogram<br/>n_mels 128 n_fft 2048]
+    D --> E[Tensor Batch<br/>shape B x 1 x 128 x T]
+
+    E --> F[Conv Block 1<br/>Conv2D 1 to 32 + BN + ReLU + MaxPool]
+    F --> G[Conv Block 2<br/>Conv2D 32 to 64 + BN + ReLU + MaxPool]
+    G --> H[Conv Block 3<br/>Conv2D 64 to 128 + BN + ReLU + MaxPool]
+    H --> I[Conv Block 4<br/>Conv2D 128 to 256 + BN + ReLU]
+    I --> J[AdaptiveAvgPool2D 1x1]
+    J --> K[Classifier Head<br/>Flatten -> Linear 256 to 128 -> Dropout -> Linear 128 to 3]
+    K --> L[Logits<br/>harmonic dead_note general_note]
+
+    L --> M[Weighted CrossEntropy Loss<br/>harmonic class upweighted]
+    M --> N[Backprop + Adam Optimizer]
+    N --> O[Epoch Loop]
+    O --> P[Validation Metrics<br/>Accuracy + per-class F1]
+    P --> Q{Model Selection Metric}
+    Q -->|Default| R[Best Validation Accuracy]
+    Q -->|Optional| S[Best Harmonic F1]
+    R --> T[Save best_model.pt]
+    S --> T
+
+    T --> U[Test Evaluation]
+    U --> V[Outputs<br/>results.json confusion_matrix.png<br/>harmonic_misclassifications.json]
+```
+
 ---
 
 ## 2. Assumptions About Input Data
